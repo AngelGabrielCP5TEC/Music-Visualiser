@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from .models import (
     AudioEvent,
     AudioProperties,
@@ -14,25 +14,21 @@ from .models import (
     Segment,
     SongAnalysis,
     TimelineFrame,
+    construct_filtered,
 )
 
 
-def _construct(cls, payload: dict[str, Any]):
-    known = {f.name for f in fields(cls)}
-    return cls(**{key: value for key, value in payload.items() if key in known})
-
-
 def analysis_from_dict(payload: dict[str, Any]) -> SongAnalysis:
-    audio = _construct(AudioProperties, payload["audio"])
-    timeline = [_construct(TimelineFrame, item) for item in payload.get("timeline", [])]
-    beats = [_construct(BeatEvent, item) for item in payload.get("beats", [])]
-    events = [_construct(AudioEvent, item) for item in payload.get("events", [])]
-    segments = [_construct(Segment, item) for item in payload.get("segments", [])]
+    audio = construct_filtered(AudioProperties, payload["audio"])
+    timeline = [construct_filtered(TimelineFrame, item) for item in payload.get("timeline", [])]
+    beats = [construct_filtered(BeatEvent, item) for item in payload.get("beats", [])]
+    events = [construct_filtered(AudioEvent, item) for item in payload.get("events", [])]
+    segments = [construct_filtered(Segment, item) for item in payload.get("segments", [])]
 
     auto_payload = payload.get("automatic_design")
     automatic = None
     if auto_payload:
-        palette = [_construct(PaletteColor, item) for item in auto_payload.get("palette", [])]
+        palette = [construct_filtered(PaletteColor, item) for item in auto_payload.get("palette", [])]
         automatic = AutomaticDesign(
             palette=palette,
             component_colors=auto_payload.get("component_colors", {}),
@@ -81,8 +77,4 @@ class AnalysisCache:
 
     def put(self, analysis: SongAnalysis) -> Path:
         path = self.path_for(analysis.source_fingerprint, analysis.analysis_version)
-        path.write_text(
-            json.dumps(analysis.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return atomic_write_json(path, analysis.to_dict())

@@ -5,6 +5,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
+from .atomic_io import atomic_write_json
 from .models import AutomaticDesign, PersonalDesign
 
 
@@ -20,11 +21,7 @@ class DesignStore:
 
     def save_automatic(self, fingerprint: str, design: AutomaticDesign) -> Path:
         path = self.automatic_dir / f"{fingerprint}.json"
-        path.write_text(
-            json.dumps(asdict(design), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return atomic_write_json(path, asdict(design))
 
     def create_personal(
         self,
@@ -47,11 +44,7 @@ class DesignStore:
 
     def save_personal(self, design: PersonalDesign) -> Path:
         path = self.personal_dir / f"{design.design_id}.json"
-        path.write_text(
-            json.dumps(design.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return atomic_write_json(path, design.to_dict())
 
     def list_personal(self, fingerprint: str | None = None) -> list[dict]:
         result = []

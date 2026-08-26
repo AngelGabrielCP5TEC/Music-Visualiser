@@ -1,7 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, TypeVar
+
+T = TypeVar("T")
+
+
+def construct_filtered(cls: type[T], payload: dict[str, Any]) -> T:
+    """Build a dataclass instance from a dict, ignoring unknown keys.
+
+    This keeps deserialization forward/backward compatible: JSON produced
+    by an older or newer schema version can still be loaded as long as the
+    fields it shares with the current dataclass are enough to construct it.
+    Used by every cache/store that round-trips dataclasses through JSON
+    (analyses, identities, designs) so they all behave the same way when
+    the schema evolves.
+    """
+    known = {f.name for f in fields(cls)}
+    return cls(**{key: value for key, value in payload.items() if key in known})
 
 
 @dataclass

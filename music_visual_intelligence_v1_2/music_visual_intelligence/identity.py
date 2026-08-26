@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .atomic_io import atomic_write_json
+from .models import construct_filtered
 from .recognition import SongIdentity
 
 
@@ -18,12 +20,11 @@ class IdentityCache:
         path = self.path_for(fingerprint)
         if not path.exists():
             return None
-        return SongIdentity(**json.loads(path.read_text(encoding="utf-8")))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        # Filtered construction: tolerates schema drift the same way
+        # AnalysisCache does, instead of failing on unknown/missing keys.
+        return construct_filtered(SongIdentity, payload)
 
     def put(self, fingerprint: str, identity: SongIdentity) -> Path:
         path = self.path_for(fingerprint)
-        path.write_text(
-            json.dumps(identity.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return atomic_write_json(path, identity.to_dict())

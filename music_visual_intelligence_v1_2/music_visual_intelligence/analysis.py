@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import math
 import time
 
 import numpy as np
@@ -36,6 +37,24 @@ def fingerprint_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _z_threshold_to_percentile(z_threshold: float) -> float:
+    """Map a z-score threshold to the equivalent normal-distribution
+    percentile rank (e.g. z=2.0 -> ~97.7th percentile).
+
+    `novelty` is percentile-normalized and clipped to [0, 1] upstream
+    (see normalization.percentile_normalize), which caps roughly the top
+    5% of values at exactly 1.0. That clipping structurally bounds how
+    large a *parametric* z-score (mean/std) can get -- with several
+    frames tied at the ceiling, the standard deviation is inflated enough
+    that a z-score of 2.0 is effectively unreachable, so a mean/std gate
+    silently detects nothing even on audio with obvious spectral changes.
+    A percentile-rank gate on the actual sample avoids that normality
+    assumption while keeping the z_threshold config value's original,
+    intuitive meaning ("flag roughly the top N% most novel frames").
+    """
+    return 100.0 * (0.5 * (1.0 + math.erf(z_threshold / math.sqrt(2.0))))
+
+
 def detect_change_events(
     frames: list[dict],
     z_threshold: float,
@@ -47,13 +66,12 @@ def detect_change_events(
     times = np.asarray([frame["time"] for frame in frames], dtype=np.float64)
     novelty = np.asarray([frame["novelty"] for frame in frames], dtype=np.float64)
 
-    mean = float(np.mean(novelty))
-    std = float(np.std(novelty))
-    if std < 1e-12:
+    if np.std(novelty) < 1e-12:
         return []
 
-    z = (novelty - mean) / std
-    candidates = np.flatnonzero(z >= z_threshold)
+    percentile_rank = _z_threshold_to_percentile(z_threshold)
+    threshold_value = float(np.percentile(novelty, percentile_rank))
+    candidates = np.flatnonzero(novelty >= threshold_value)
     selected: list[int] = []
 
     for idx in candidates:
@@ -184,8 +202,16 @@ def analyze_audio(
     fingerprint = fingerprint_file(source)
     phase["fingerprint_seconds"] = time.perf_counter() - t0
 
-    total = time.perf_counter() - monitor.started
-    rtf = total / max(duration, 1e-9)
+    # Single call to finish() — it already samples RSS and reports platform/python.
+    perf_summary = monitor.finish(duration)
+    phase.update({
+        "total_seconds": perf_summary["wall_time_seconds"],
+        "real_time_factor": perf_summary["real_time_factor"],
+        "audio_seconds_per_processing_second": perf_summary["audio_seconds_per_processing_second"],
+        "peak_rss_mb": perf_summary["peak_rss_mb"],
+        "python": perf_summary["python"],
+        "platform": perf_summary["platform"],
+    })
 
     beats = [
         BeatEvent(
@@ -195,18 +221,6 @@ def analyze_audio(
         )
         for time_value, strength in zip(beat_times, beat_strengths)
     ]
-
-    phase.update({
-        "total_seconds": total,
-        "real_time_factor": rtf,
-        "audio_seconds_per_processing_second": duration / max(total, 1e-9),
-    })
-
-    phase.update({
-        "peak_rss_mb": monitor.peak_rss / (1024 * 1024),
-        "python": monitor.finish(duration)["python"],
-        "platform": monitor.finish(duration)["platform"],
-    })
 
     analysis = SongAnalysis(
         schema_version=config.schema_version,

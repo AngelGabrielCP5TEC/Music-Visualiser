@@ -41,13 +41,21 @@ pytest
 
 ## Reconocimiento automático
 
+> **Nota de plataforma:** `mvi setup-fpcalc` descarga actualmente el binario
+> oficial de Chromaprint **solo para Windows x86_64**. En Linux/macOS,
+> instala `fpcalc` por tu cuenta (por ejemplo, vía el gestor de paquetes de
+> tu sistema o los binarios oficiales de Chromaprint) y expón su ruta con
+> la variable de entorno `MVI_FPCALC`, o asegúrate de que esté en el PATH.
+> El resto del pipeline de reconocimiento (AcoustID, MusicBrainz, Cover Art
+> Archive) es multiplataforma.
+
 Configurar la clave de AcoustID solo mediante variable de entorno:
 
 ```powershell
 $env:MVI_ACOUSTID_CLIENT="TU_CLIENT_KEY"
 ```
 
-Descargar `fpcalc` dentro del propio proyecto:
+Descargar `fpcalc` dentro del propio proyecto (Windows):
 
 ```powershell
 mvi setup-fpcalc
@@ -77,11 +85,11 @@ cache/identity/
 mvi designs list
 ```
 
-# Music Visual Intelligence — V1.1
+# Music Visual Intelligence — V1.2
 
 ## Estado
 
-Primera implementación ampliada del núcleo local.
+Núcleo local de análisis + reconocimiento + diseño automático de portada.
 
 Esta versión está diseñada específicamente para funcionar con **Python 3.14** sin depender de `librosa` ni `scipy`.
 
@@ -97,24 +105,7 @@ persistencia
 rendimiento medible
 ```
 
-antes de incorporar reconocimiento musical externo, GUI o separación de instrumentos.
-
----
-
-## V1.1: qué se añadió
-
-Respecto al núcleo anterior:
-
-- caché realmente reutilizable mediante deserialización;
-- fingerprint antes del DSP, de modo que un cache hit evita el análisis costoso;
-- exportación CSV del timeline;
-- almacenamiento separado de diseños automáticos;
-- modelo de diseños personales;
-- comando para listar diseños;
-- benchmark reproducible mediante métricas del propio análisis;
-- beat estimation completamente local con NumPy;
-- eliminación completa de librosa/SciPy;
-- pruebas adicionales para tempo, flux, persistencia y diseños.
+antes de incorporar GUI, separación de instrumentos o visualización en tiempo real.
 
 ---
 
@@ -138,23 +129,6 @@ scikit-learn
 ```
 
 Esto reduce la superficie de dependencias binarias y evita que SciPy sea necesario para ejecutar el núcleo.
-
----
-
-## Instalación
-
-```powershell
-py -3.14 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-Verificación:
-
-```powershell
-pytest
-```
 
 ---
 
@@ -182,38 +156,41 @@ La señal está construida deliberadamente con:
 ```
 
 Esto permite comprobar que los cambios espectrales aparecen donde esperamos.
+La suite de tests incluye un test de integración (`tests/test_integration_pipeline.py`)
+que corre el pipeline completo sobre esta misma señal y valida que la
+detección de bandas y de eventos de cambio se comporte razonablemente
+contra ese ground truth conocido.
+
+> Nota: con un tono puro de baja frecuencia (100 Hz), el propio STFT genera
+> cierto ruido de fuga espectral que puede opacar la detección de algún
+> límite puntual. Es un comportamiento esperado del método V1 de novelty
+> por spectral flux, no un fallo del pipeline; con contenido de banda
+> ancha (música real) el detector se comporta de forma más estable.
 
 ---
 
 ## Analizar una canción real
 
 ```powershell
-mvi analyze "C:\Users\Angel\Desktop\Sound\songs\Drag_Path.mp3.mpeg"
+mvi analyze "C:\ruta\cancion.mp3"
 ```
 
 Con portada:
 
 ```powershell
-mvi analyze `
-  "C:\Users\Angel\Desktop\Sound\songs\Drag_Path.mp3.mpeg" `
-  --cover "C:\Users\Angel\Desktop\Sound\cover.jpg"
+mvi analyze "C:\ruta\cancion.mp3" --cover "C:\ruta\portada.jpg"
 ```
 
 Guardar JSON:
 
 ```powershell
-mvi analyze `
-  "C:\Users\Angel\Desktop\Sound\songs\Drag_Path.mp3.mpeg" `
-  --output data\drag_path.json
+mvi analyze "C:\ruta\cancion.mp3" --output data\cancion.json
 ```
 
 Guardar además CSV:
 
 ```powershell
-mvi analyze `
-  "C:\Users\Angel\Desktop\Sound\songs\Drag_Path.mp3.mpeg" `
-  --output data\drag_path.json `
-  --csv data\drag_path_timeline.csv
+mvi analyze "C:\ruta\cancion.mp3" --output data\cancion.json --csv data\cancion_timeline.csv
 ```
 
 ---
@@ -411,7 +388,7 @@ y:
 Flux_t = sqrt(Σ Δ_k,t²)
 ```
 
-Después se normaliza para formar la serie de `novelty`.
+Después se normaliza (percentil 5–95, recortado a [0,1]) para formar la serie de `novelty`.
 
 ---
 
@@ -446,6 +423,23 @@ alimentar la visualización
 ```
 
 Una implementación MIR más sofisticada podrá sustituirse posteriormente detrás de la misma interfaz.
+
+---
+
+# Detección de cambios (eventos)
+
+Un frame se marca como cambio significativo cuando su `novelty` cae dentro
+del extremo superior de la distribución de la propia canción. El parámetro
+`significant_change_z` en `config.py` se interpreta como un z-score
+equivalente bajo una normal (por ejemplo, `2.0` ≈ percentil 97.7), pero el
+umbral real se calcula directamente sobre el percentil de la muestra, no
+sobre media/desviación estándar paramétrica.
+
+Esto es intencional: `novelty` ya viene recortada a `[0, 1]` por
+`percentile_normalize`, lo cual satura varios frames exactamente en `1.0`.
+Sobre una distribución así, un z-score paramétrico rara vez alcanza `2.0`
+aunque existan picos reales evidentes, así que un umbral basado en
+percentil de la muestra es más robusto sin asumir una distribución normal.
 
 ---
 
@@ -517,6 +511,15 @@ hash → load
 ```
 
 La segunda ejecución no necesita volver a calcular la STFT, flux, tempo, beats o segmentos.
+
+Todas las escrituras de caché (análisis, identidad, diseños) son **atómicas**:
+se escribe a un archivo temporal en el mismo directorio y se reemplaza con
+`os.replace`, para que una interrupción a mitad de escritura nunca deje un
+JSON corrupto o truncado.
+
+La deserialización de JSON hacia dataclasses (análisis, identidad, diseños)
+ignora campos desconocidos, para que un esquema futuro con campos nuevos
+siga siendo legible por versiones anteriores del código.
 
 ---
 
@@ -664,28 +667,6 @@ significa:
 20 segundos de audio procesados por cada segundo real.
 ```
 
----
-
-# Importante sobre rendimiento
-
-El primer objetivo no es minimizar cada milisegundo.
-
-Es construir una línea base reproducible.
-
-Ejemplo:
-
-```text
-Audio duration = 304 s
-
-V1.1:
-processing = 7.3 s
-
-RTF ≈ 0.024
-throughput ≈ 41.6
-```
-
-Eso significa que, según esa ejecución, el análisis procesa aproximadamente 41.6 segundos de audio por segundo de cómputo.
-
 Este número debe considerarse dependiente del hardware y de la configuración.
 
 ---
@@ -703,126 +684,118 @@ La suite incluye:
 - agregación temporal;
 - detección de flux;
 - estimación de tempo;
-- serialización/deserialización de caché;
-- persistencia de diseños.
+- detección de eventos de cambio (incluyendo un caso de regresión sobre
+  distribuciones recortadas en el techo);
+- serialización/deserialización de caché (incluida tolerancia a esquemas
+  futuros con campos desconocidos);
+- persistencia de diseños (incluida verificación de que las escrituras
+  atómicas no dejan archivos temporales sueltos);
+- reconocimiento (helpers de AcoustID/MusicBrainz, caché de identidad);
+- **un test de integración end-to-end** que corre el pipeline completo
+  sobre la señal sintética de `tools/generate_test_tone.py` y valida
+  duración, bandas dominantes por tramo, eventos de cambio y segmentos
+  contra el ground truth conocido de la señal.
 
 ---
 
-# Próximo módulo: reconocimiento
+# Reconocimiento musical
 
-El siguiente módulo lógico será:
+El flujo es:
 
 ```text
 Audio
-  ↓
-Audio Fingerprint
-  ↓
-Recognition Provider
-  ↓
-Song Identity
+ ↓
+Chromaprint / fpcalc
+ ↓
+AcoustID
+ ↓
+MusicBrainz Recording
+ ↓
+Release / Release Group
+ ↓
+Cover Art URL
 ```
 
-La arquitectura debe soportar distintos proveedores.
+AcoustID requiere una clave `client`, limita su Web Service a 3 solicitudes
+por segundo y declara el uso gratuito como no comercial.
+
+Chromaprint publica oficialmente `fpcalc`. El comando `mvi setup-fpcalc`
+descarga ese binario dentro del proyecto (actualmente solo para Windows
+x86_64) y no modifica el PATH del sistema.
+
+MusicBrainz no requiere una API key para el Web Service normal, pero exige
+un `User-Agent` significativo y aproximadamente una solicitud por segundo;
+el cliente MVI utiliza un intervalo mínimo de 1.1 segundos.
+
+MusicBrainz permite solicitar releases y release-groups relacionados desde
+un Recording usando `inc=`.
+
+## Dependencias del reconocimiento
+
+El núcleo DSP sigue funcionando sin:
 
 ```text
-RecognitionProvider
-├── AcoustID
-├── AudD
-└── FutureProvider
+librosa
+scipy
+internet
+AcoustID
+fpcalc
 ```
 
-La integración de reconocimiento queda separada deliberadamente porque los proveedores externos tienen sus propias restricciones, claves API, límites de solicitud y condiciones de uso.
+El reconocimiento es un módulo independiente.
 
-AcoustID actualmente ofrece lookup mediante fingerprints de Chromaprint y exige una `client` API key; además indica un límite de 3 solicitudes por segundo y uso no comercial gratuito para su servicio web. citeturn867808search0
-
-Cuando implementemos ese módulo se documentarán sus credenciales y requisitos por separado, sin introducirlos dentro del núcleo DSP.
-
----
-
-# Metadatos y portada
-
-Una vez obtenido un MusicBrainz Recording ID, el proyecto podrá consultar el API de MusicBrainz. Su API REST utiliza `/ws/2/` y permite lookups de entidades mediante MBID. citeturn867808search2
-
-La portada podrá obtenerse mediante Cover Art Archive, que permite consultar una portada frontal o thumbnails de 250, 500 y 1200 px mediante un MusicBrainz Release ID o Release Group ID. citeturn672188search0
-
-La imagen se analizará localmente y solo se conservarán los datos visuales necesarios cuando sea posible.
-
----
-
-# Decisión arquitectónica importante
-
-La V1.1 **no intenta hacer todo todavía**.
-
-La prioridad es mantener:
+Si no está listo:
 
 ```text
-Audio analysis
-      |
-      v
-Canonical data
-      |
-      v
-Cache
-      |
-      +---- Automatic design
-      |
-      +---- Personal design
+mvi analyze
 ```
 
-Luego:
+continúa funcionando.
+
+Si se desea reconocimiento:
 
 ```text
-Recognition
-Metadata
-Lyrics
-Visualization
+mvi doctor
+→ setup-fpcalc (Windows) o instalar fpcalc manualmente (Linux/macOS)
+→ configurar MVI_ACOUSTID_CLIENT
+→ mvi identify
 ```
 
-se conectarán a esta capa.
+## Consideraciones legales
+
+No guardar claves API en Git.
+
+No desactivar Windows Defender, AppLocker o Application Control.
+
+AcoustID debe utilizarse respetando sus condiciones, especialmente la
+restricción de uso no comercial del servicio gratuito.
+
+MusicBrainz debe utilizarse respetando sus reglas de rate limiting y
+User-Agent.
 
 ---
 
 # Roadmap inmediato
 
-## V1.1 — Actual
+## V1.2 — Actual
 
-- [x] NumPy DSP
-- [x] SoundFile
-- [x] Python 3.14
-- [x] STFT
-- [x] RMS
-- [x] bandas
-- [x] centroid
-- [x] novelty/flux
-- [x] tempo
-- [x] beats
-- [x] segments
-- [x] salience
-- [x] cache pre-DSP
-- [x] cache deserialization
-- [x] CSV
-- [x] automatic design store
-- [x] personal design model
-- [x] performance metrics
+- [x] NumPy DSP sin SciPy/librosa
+- [x] Reconocimiento (AcoustID + MusicBrainz + Cover Art Archive)
+- [x] Caché de análisis e identidad, con deserialización tolerante a esquema
+- [x] Escrituras de caché atómicas
+- [x] Detección de eventos de cambio basada en percentil de muestra
+- [x] Test de integración end-to-end contra señal sintética conocida
+- [x] Diseño automático + diseños personales
+- [x] Métricas de rendimiento
 
-## V1.2 — siguiente
+## V1.3 — siguiente
 
 ```text
-Recognition
-    ↓
-MusicBrainz metadata
-    ↓
-Cover Art Archive
-    ↓
-Automatic song identity
-```
-
-## V1.3
-
-```text
-Automatic design refinement
+Editor de diseño personal vía configuración
 +
-Personal design editor via configuration
+Caché de metadatos MusicBrainz (evitar relookups en procesamiento por lotes)
++
+Soporte fpcalc en Linux/macOS
 ```
 
 ## V1.4
@@ -865,73 +838,3 @@ El audio se analiza una vez.
 El análisis canónico se conserva.
 
 Los diseños visuales pueden cambiar sin volver a ejecutar el DSP.
-
-
----
-
-# Reconocimiento musical V1.2
-
-El flujo es:
-
-```text
-Audio
- ↓
-Chromaprint / fpcalc
- ↓
-AcoustID
- ↓
-MusicBrainz Recording
- ↓
-Release / Release Group
- ↓
-Cover Art URL
-```
-
-AcoustID requiere una clave `client`, limita su Web Service a 3 solicitudes por segundo y declara el uso gratuito como no comercial. citeturn430563search1
-
-Chromaprint publica oficialmente `fpcalc` para Windows x86_64. El comando `mvi setup-fpcalc` descarga ese binario dentro del proyecto y no modifica el PATH de Windows. citeturn806092search2
-
-MusicBrainz no requiere una API key para el Web Service normal, pero exige un `User-Agent` significativo y aproximadamente una solicitud por segundo; el cliente MVI utiliza un intervalo mínimo de 1.1 segundos. citeturn430563search0turn430563search2
-
-MusicBrainz permite solicitar releases y release-groups relacionados desde un Recording usando `inc=`. citeturn939905search0
-
-## Dependencias del reconocimiento
-
-El núcleo DSP sigue funcionando sin:
-
-```text
-librosa
-scipy
-internet
-AcoustID
-fpcalc
-```
-
-El reconocimiento es un módulo independiente.
-
-Si no está listo:
-
-```text
-mvi analyze
-```
-
-continúa funcionando.
-
-Si se desea reconocimiento:
-
-```text
-mvi doctor
-→ setup-fpcalc
-→ configurar MVI_ACOUSTID_CLIENT
-→ mvi identify
-```
-
-## Consideraciones legales
-
-No guardar claves API en Git.
-
-No desactivar Windows Defender, AppLocker o Application Control.
-
-AcoustID debe utilizarse respetando sus condiciones, especialmente la restricción de uso no comercial del servicio gratuito. citeturn430563search1
-
-MusicBrainz debe utilizarse respetando sus reglas de rate limiting y User-Agent. citeturn430563search0turn430563search2
